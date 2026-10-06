@@ -2,7 +2,9 @@
 
 from .catalog import (
     Processor,
+    ProcessorContext,
     ProcessorError,
+    ShopContext,
     catalog,
     get_processor,
     get_spec,
@@ -11,11 +13,13 @@ from .catalog import (
     validate_parameters,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Processor",
+    "ProcessorContext",
     "ProcessorError",
+    "ShopContext",
     "catalog",
     "get_processor",
     "get_spec",

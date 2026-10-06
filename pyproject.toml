@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "extore-processors"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reviewed, code-defined product processors for Extore"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,4 +20,3 @@ include = ["extore_processors*"]
 
 [tool.ruff]
 target-version = "py311"
-

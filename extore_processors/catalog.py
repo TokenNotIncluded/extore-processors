@@ -18,6 +18,157 @@ class ProcessorError(ValueError):
         super().__init__(code + (f": {field}" if field else ""))
 
 
+def _step_plan(value, *, allow_empty=False):
+    if (
+        not isinstance(value, (list, tuple))
+        or not (0 if allow_empty else 1) <= len(value) <= 30
+    ):
+        raise ProcessorError("invalid_progress_plan")
+    result = []
+    for step in value:
+        if not isinstance(step, Mapping) or set(step) - {"id", "label", "done"}:
+            raise ProcessorError("invalid_progress_plan")
+        sid, labels = step.get("id"), step.get("label")
+        if not isinstance(sid, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9_-]{0,39}", sid
+        ):
+            raise ProcessorError("invalid_progress_plan")
+        if (
+            not isinstance(labels, Mapping)
+            or not 1 <= len(labels) <= 20
+            or any(
+                not isinstance(locale, str)
+                or not locale.strip()
+                or len(locale) > 40
+                or not isinstance(label, str)
+                or not label.strip()
+                or len(label) > 200
+                for locale, label in labels.items()
+            )
+        ):
+            raise ProcessorError("invalid_progress_plan")
+        result.append({"id": sid, "label": dict(labels)})
+    if len({step["id"] for step in result}) != len(result):
+        raise ProcessorError("invalid_progress_plan")
+    return result
+
+
+def _completed_steps(value, plan, previous=()):
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) > 30
+        or any(
+            not isinstance(sid, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", sid)
+            for sid in value
+        )
+        or len(set(value)) != len(value)
+    ):
+        raise ProcessorError("invalid_completed_steps")
+    ids = [step["id"] for step in plan]
+    if not set(value) <= set(ids) or not set(previous) <= set(value):
+        raise ProcessorError("invalid_completed_steps")
+    return tuple(sid for sid in ids if sid in value)
+
+
+@dataclass(frozen=True)
+class ShopContext:
+    """Trusted server routing metadata, never customer input or credentials."""
+
+    shop_id: str | None = None
+    profile_id: str | None = None
+    revision: int | None = None
+
+    def __post_init__(self):
+        if any(
+            value is not None
+            and (not isinstance(value, str) or not 1 <= len(value) <= 100)
+            for value in (self.shop_id, self.profile_id)
+        ):
+            raise ProcessorError("invalid_shop_context")
+        if self.revision is not None and (
+            type(self.revision) is not int or self.revision < 1
+        ):
+            raise ProcessorError("invalid_shop_context")
+
+
+class ProcessorContext:
+    """Define a task's frozen plan and emit bounded, validated JSON progress."""
+
+    def __init__(self, *, steps=(), completed_steps=(), shop_context=None, emit=None):
+        self._steps = self._freeze(_step_plan(steps, allow_empty=True))
+        self._completed = _completed_steps(completed_steps, self.steps)
+        if shop_context is None:
+            shop_context = ShopContext()
+        elif isinstance(shop_context, Mapping):
+            if set(shop_context) - {"shop_id", "profile_id", "revision"}:
+                raise ProcessorError("invalid_shop_context")
+            shop_context = ShopContext(**shop_context)
+        elif not isinstance(shop_context, ShopContext):
+            raise ProcessorError("invalid_shop_context")
+        self._shop_context = shop_context
+        self._emit = emit or (lambda value: None)
+
+    @staticmethod
+    def _freeze(plan):
+        return tuple(
+            MappingProxyType(
+                {"id": step["id"], "label": MappingProxyType(dict(step["label"]))}
+            )
+            for step in plan
+        )
+
+    @property
+    def steps(self):
+        return self._steps
+
+    @property
+    def completed_steps(self):
+        return self._completed
+
+    @property
+    def shop_context(self):
+        return self._shop_context
+
+    @staticmethod
+    def _message(value):
+        if not isinstance(value, str) or len(value) > 1000:
+            raise ProcessorError("invalid_progress_message")
+        return value
+
+    def define_steps(self, plan, message=""):
+        if self.steps or self.completed_steps:
+            raise ProcessorError("progress_plan_frozen")
+        plan = _step_plan(plan)
+        message = self._message(message)
+        self._steps = self._freeze(plan)
+        self._emit(
+            {
+                "kind": "progress",
+                "progress_steps": plan,
+                "progress": 0,
+                "completed_steps": [],
+                "message": message,
+            }
+        )
+
+    def progress(self, percent=None, message="", *, completed_steps=None):
+        if percent is not None and (type(percent) is not int or not 0 <= percent <= 99):
+            raise ProcessorError("invalid_progress")
+        if percent is None and completed_steps is None:
+            raise ProcessorError("invalid_progress")
+        payload = {"kind": "progress", "message": self._message(message)}
+        if percent is not None:
+            payload["progress"] = percent
+        if completed_steps is not None:
+            completed = _completed_steps(
+                completed_steps, self.steps, self.completed_steps
+            )
+            self._completed = completed
+            payload["completed_steps"] = list(completed)
+        self._emit(payload)
+
+
 def _field(key, zh, en, *, kind="text", required=True, zh_help="", en_help=""):
     return {
         "key": key,
@@ -120,7 +271,19 @@ def get_spec(processor_id: str) -> dict:
     """Return a copy: caller changes cannot alter the running registry."""
     if not isinstance(processor_id, str) or processor_id not in _SPECS:
         raise ProcessorError("unknown_processor")
-    return copy.deepcopy(_SPECS[processor_id])
+    result = copy.deepcopy(_SPECS[processor_id])
+    result["shop_configuration"] = copy.deepcopy(result["configuration"])
+    result["progress_steps"] = [
+        {
+            "id": "validate_input",
+            "label": {"zh-CN": "核对信息", "en": "Validate inputs"},
+        },
+        {
+            "id": "prepare_delivery",
+            "label": {"zh-CN": "生成交付", "en": "Prepare delivery"},
+        },
+    ]
+    return result
 
 
 def catalog() -> list[dict]:
@@ -228,17 +391,39 @@ def validate_parameters(processor_id: str, params) -> dict[str, str]:
     return values
 
 
-def run(processor_id: str, params, configuration) -> dict:
+def run(
+    processor_id: str, params, configuration, *, context: ProcessorContext | None = None
+) -> dict:
     """Run only an explicit, reviewed handler with code-defined inputs/outputs."""
     spec = get_spec(processor_id)
     values = validate_parameters(processor_id, params)
     settings = validate_configuration(processor_id, configuration)
+    if context is None:
+        context = ProcessorContext()
+    elif not isinstance(context, ProcessorContext):
+        raise ProcessorError("invalid_processor_context")
+    if not context.steps:
+        context.define_steps(spec["progress_steps"], "开始处理")
+    own_plan = [step["id"] for step in context.steps] == [
+        step["id"] for step in spec["progress_steps"]
+    ]
+    first_done = list(context.completed_steps)
+    if own_plan and "validate_input" not in first_done:
+        first_done.append("validate_input")
+    context.progress(
+        50, "已核对商品信息", completed_steps=first_done if own_plan else None
+    )
     output = _HANDLERS[processor_id](values, settings)
     # Validate the declared result even though the handler itself is trusted.
     fields = [dict(field, max_length=100000) for field in spec["outputs"]]
     output = _strings(output, fields)
     if processor_id == "resource_link":
         _https_url(output["resource_url"])
+    context.progress(
+        99,
+        "交付内容已准备好",
+        completed_steps=[step["id"] for step in context.steps] if own_plan else None,
+    )
     return {"status": "succeeded", "output": output}
 
 
@@ -250,8 +435,10 @@ class Processor:
     def spec(self) -> dict:
         return get_spec(self.id)
 
-    def run(self, params, configuration) -> dict:
-        return run(self.id, params, configuration)
+    def run(
+        self, params, configuration, *, context: ProcessorContext | None = None
+    ) -> dict:
+        return run(self.id, params, configuration, context=context)
 
 
 def get_processor(processor_id: str) -> Processor:

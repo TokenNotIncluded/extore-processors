@@ -1,9 +1,9 @@
-"""Single-job JSON protocol. stdout contains exactly one result on success."""
+"""Single-job JSONL protocol: validated progress, then exactly one result."""
 
 import json
 import sys
 
-from .catalog import ProcessorError, run
+from .catalog import ProcessorContext, ProcessorError, run
 
 MAX_INPUT_BYTES = 200000
 
@@ -23,7 +23,14 @@ def main() -> int:
             not isinstance(value, dict)
             or not {"params", "configuration"} <= set(value)
             or set(value)
-            - {"params", "configuration", "variant", "steps", "completed_steps"}
+            - {
+                "params",
+                "configuration",
+                "variant",
+                "steps",
+                "completed_steps",
+                "shop_context",
+            }
             or ("variant" in value and not isinstance(value["variant"], dict))
             or ("steps" in value and not isinstance(value["steps"], list))
             or (
@@ -32,7 +39,19 @@ def main() -> int:
             )
         ):
             raise ProcessorError("invalid_job_envelope")
-        result = run(sys.argv[1], value["params"], value["configuration"])
+
+        def emit(progress):
+            print(json.dumps(progress, ensure_ascii=False), flush=True)
+
+        context = ProcessorContext(
+            steps=value.get("steps", []),
+            completed_steps=value.get("completed_steps", []),
+            shop_context=value.get("shop_context"),
+            emit=emit,
+        )
+        result = run(
+            sys.argv[1], value["params"], value["configuration"], context=context
+        )
         print(
             json.dumps(
                 {
@@ -50,6 +69,10 @@ def main() -> int:
         if exc.field:
             error["field"] = exc.field
         print(json.dumps(error), file=sys.stderr)
+        return 2
+    except Exception:  # noqa: BLE001 - handler exceptions may contain credentials
+        # Keep implementation failures and any credentials out of logs/stdout.
+        print(json.dumps({"error": "processor_failed"}), file=sys.stderr)
         return 2
 
 
