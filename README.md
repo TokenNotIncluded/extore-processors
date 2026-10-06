@@ -76,7 +76,9 @@ context = ProcessorContext(
     shop_context={"shop_id": "shop-a", "profile_id": None, "revision": None},
     emit=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True),
 )
-result = run("personalized_text", {"name": "Alice"}, {"template": "Hello $name"}, context=context)
+result = run(
+    "personalized_text", {"name": "Alice"}, {"template": "Hello $name"}, context=context
+)
 ```
 
 预设会先验证参数与配置，再为尚无计划的任务定义「核对信息」「生成交付」两步。校验和结果生成实际完成之后才报告相应步骤，最后返回成功结果。进度消息不会包含顾客输入、资源链接、模板或店铺配置值。
