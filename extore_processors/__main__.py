@@ -30,6 +30,7 @@ def main() -> int:
                 "steps",
                 "completed_steps",
                 "shop_context",
+                "environment",
             }
             or ("variant" in value and not isinstance(value["variant"], dict))
             or ("steps" in value and not isinstance(value["steps"], list))
@@ -47,6 +48,7 @@ def main() -> int:
             steps=value.get("steps", []),
             completed_steps=value.get("completed_steps", []),
             shop_context=value.get("shop_context"),
+            environment=value.get("environment", {}),
             emit=emit,
         )
         result = run(

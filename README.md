@@ -13,7 +13,7 @@ MIT 许可，Python 3.11 或更新版本，只使用 Python 标准库，没有�
 | `resource_link` | 无 | `resource_url` 必填；`message` 可选 | `resource_url`、`message` |
 | `personalized_text` | `name` 称呼，必填，最多 200 字符 | `template` 纯文本模板 | `content` |
 
-`resource_link` 返回商家配置的 HTTPS 资源地址和使用说明，不访问资源地址。地址可包含访问令牌，因此地址和说明均视作商家私密配置，不能通过商品展示 API 提前公开。使用说明按多行纯文本交付。
+`resource_link` 返回商家配置的 HTTPS 资源地址和使用说明，不访问资源地址。地址可包含访问令牌，按秘密配置处理；说明为普通文本，店主可回读编辑。二者都不会通过公开商品资料提前提供。使用说明按多行纯文本交付。
 
 `personalized_text` 使用 `string.Template` 做文本替换，只接受 `$name`、`${name}` 和 `$$`（一个美元符号）。默认模板是：
 
@@ -52,7 +52,7 @@ assert result == {"status": "succeeded", "output": {"content": "Hello, Alice!"}}
 - `shop_configuration`：同一套代码定义的配置 schema，供店铺配置档案使用。它是独立副本，当前与 `configuration` 兼容。
 - `progress_steps`：代码定义的默认步骤；仅在任务尚未定义步骤时初始化。
 
-输入、输出和配置字段都有 `key`、双语 `label`、双语 Markdown `description`、`collapsed`、`required`、`type`。字段类型与 Extore 商品字段兼容。当前配置均标记 `secret: true`，公开规格只包含定义和通用默认模板，不能包含商家填写的配置值。
+输入、输出和配置字段都有 `key`、双语 `label`、双语 Markdown `description`、`collapsed`、`required`、`type`。字段类型与 Extore 商品字段兼容。`template` 与 `message` 明确标记 `secret: false`，供店主回读编辑；`resource_url` 为秘密。Extore 对缺失、含糊或重复的声明按秘密处理。公开规格只包含定义和通用默认模板，不能包含商家填写的配置值。
 
 `validate_configuration(id, configuration, allow_incomplete=True)` 可以保存未填写完成的草稿，仍会检查已经填写的 URL、模板和数据类型。发行卡密和实际运行必须使用默认的完整校验。声明的默认值会应用于缺失字段；明确填写空字符串不会被默认值覆盖。
 
@@ -89,6 +89,8 @@ result = run(
 
 `context.steps` 和 `context.completed_steps` 为只读快照。`context.shop_context` 是不可变 `ShopContext`，只包含服务端提供的 `shop_id`、可选 `profile_id` 和正整数 `revision`，不包含凭据。顾客 `params` 不会覆盖店铺上下文。实际配置值由 Extore 在店铺范围内解析后放入单独的 `configuration`。
 
+`context.environment` 是独立的只读字符串映射，由 Extore 从本张卡密发行时冻结的店铺配置版本读取，包含普通变量和获准供此处理器使用的秘密值。默认是空映射，顾客参数不覆盖它。Extore 同时以 `EXTORE_WORKFLOW_<NAME>` 前缀传入进程环境，避免改变 Python、动态加载器或宿主服务的设置。环境不会自动插入模板、进度或交付输出；处理器代码仍须审查，不能把秘密打印、记录或交付给顾客。
+
 ## 单任务命令行协议
 
 安装，或直接在仓库目录执行：
@@ -98,7 +100,7 @@ python -m pip install .
 python -m extore_processors resource_link < job.json
 ```
 
-`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps` 和 `shop_context`；不接受其他字段：
+`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps`、`shop_context` 和 `environment`；不接受其他字段。环境最多 128 项，每个值最多 8 KiB UTF-8，值合计最多 64 KiB；完整输入仍最多 200,000 字节：
 
 ```json
 {
@@ -145,6 +147,6 @@ git submodule update --init --recursive
 
 ## 信任范围
 
-这是一组经过审核并固定版本的可信程序。限制商家只能选择预设，可以避免执行商家上传的恶意程序。Python 子进程自身不是恶意代码沙箱；如果以后允许陌生人提交并直接运行新代码，还需要独立隔离与审核。
+这是一组经过审核并固定版本的可信程序。限制商家只能选择预设，可以避免执行商家上传的恶意程序。直接运行本包的 Python 命令不会创建沙箱。Extore 的服务器 worker 另外使用固定的离线 Linux bubblewrap 和系统调用过滤，限制资源并禁止创建文件、启动子程序和网络连接；它们不替代源码审核。获准读取秘密的处理器仍可能把秘密写入输出，隔离不能替商家判断代码的业务意图。复杂文档与 PPT 制作通过外部 AI 和 Extore CLI 队列完成。
 
 Extore 的“立即销毁”让 Extore 发货页面不再显示结果，不会自动撤销资源服务器上的地址，也无法删除顾客已经复制的内容。资源服务器需要另行控制地址的有效期或撤销。

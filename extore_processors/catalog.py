@@ -8,6 +8,10 @@ from string import Template
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
+MAX_ENVIRONMENT_FIELDS = 128
+MAX_ENVIRONMENT_VALUE_BYTES = 8192
+MAX_ENVIRONMENT_BYTES = 65536
+
 
 class ProcessorError(ValueError):
     """A safe validation error that never includes customer or secret values."""
@@ -16,6 +20,33 @@ class ProcessorError(ValueError):
         self.code = code
         self.field = field
         super().__init__(code + (f": {field}" if field else ""))
+
+
+def _freeze_environment(value):
+    if not isinstance(value, Mapping) or len(value) > MAX_ENVIRONMENT_FIELDS:
+        raise ProcessorError("invalid_environment")
+    result = {}
+    total_bytes = 0
+    for name, content in value.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name)
+            or not isinstance(content, str)
+            or "\x00" in content
+        ):
+            raise ProcessorError("invalid_environment")
+        try:
+            content_bytes = len(content.encode("utf-8"))
+        except UnicodeError:
+            raise ProcessorError("invalid_environment") from None
+        total_bytes += content_bytes
+        if (
+            content_bytes > MAX_ENVIRONMENT_VALUE_BYTES
+            or total_bytes > MAX_ENVIRONMENT_BYTES
+        ):
+            raise ProcessorError("environment_too_large")
+        result[name] = content
+    return MappingProxyType(result)
 
 
 def _step_plan(value, *, allow_empty=False):
@@ -95,7 +126,15 @@ class ShopContext:
 class ProcessorContext:
     """Define a task's frozen plan and emit bounded, validated JSON progress."""
 
-    def __init__(self, *, steps=(), completed_steps=(), shop_context=None, emit=None):
+    def __init__(
+        self,
+        *,
+        steps=(),
+        completed_steps=(),
+        shop_context=None,
+        environment=MappingProxyType({}),
+        emit=None,
+    ):
         self._steps = self._freeze(_step_plan(steps, allow_empty=True))
         self._completed = _completed_steps(completed_steps, self.steps)
         if shop_context is None:
@@ -107,6 +146,7 @@ class ProcessorContext:
         elif not isinstance(shop_context, ShopContext):
             raise ProcessorError("invalid_shop_context")
         self._shop_context = shop_context
+        self._environment = _freeze_environment(environment)
         self._emit = emit or (lambda value: None)
 
     @staticmethod
@@ -129,6 +169,11 @@ class ProcessorContext:
     @property
     def shop_context(self):
         return self._shop_context
+
+    @property
+    def environment(self):
+        """Frozen workflow variables and secrets, separate from customer inputs."""
+        return self._environment
 
     @staticmethod
     def _message(value):
@@ -223,8 +268,9 @@ _TEMPLATE = _field(
 )
 
 
-def _configuration(field, *, max_length=10000, default=None):
-    value = {**field, "secret": True, "max_length": max_length}
+def _configuration(field, *, max_length=10000, default=None, secret=True):
+    # Only an explicit False permits exposing a value in the shop editor.
+    value = {**field, "secret": secret is not False, "max_length": max_length}
     if default is not None:
         value["default"] = default
     return value
@@ -245,7 +291,7 @@ _SPECS = MappingProxyType(
             "outputs": [_RESOURCE_URL, _MESSAGE],
             "configuration": [
                 _configuration(_RESOURCE_URL, max_length=2000),
-                _configuration(_MESSAGE, default=""),
+                _configuration(_MESSAGE, default="", secret=False),
             ],
         },
         "personalized_text": {
@@ -260,7 +306,11 @@ _SPECS = MappingProxyType(
             "parameters": [_NAME],
             "outputs": [_CONTENT],
             "configuration": [
-                _configuration(_TEMPLATE, default="你好，$name！\n你的商品已准备好。")
+                _configuration(
+                    _TEMPLATE,
+                    default="你好，$name！\n你的商品已准备好。",
+                    secret=False,
+                )
             ],
         },
     }
@@ -347,7 +397,7 @@ def _template(value):
 def validate_configuration(
     processor_id: str, configuration, *, allow_incomplete: bool = False
 ) -> dict[str, str]:
-    """Validate secret settings, optionally permitting an unfinished draft.
+    """Validate shop settings, optionally permitting an unfinished draft.
 
     Optional defaults declared by the processor are applied. Incomplete mode
     permits empty required values; it never skips validation of supplied values.

@@ -15,6 +15,7 @@ from extore_processors import (
     validate_configuration,
     validate_parameters,
 )
+from extore_processors.catalog import _configuration
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,7 +36,68 @@ class CatalogTests(unittest.TestCase):
                     self.assertIn("collapsed", field)
                     self.assertIn("required", field)
                     self.assertIn("description", field)
-            self.assertTrue(all(f["secret"] for f in spec["configuration"]))
+            self.assertTrue(
+                all(type(f["secret"]) is bool for f in spec["configuration"])
+            )
+
+    def test_configuration_is_secret_unless_explicitly_marked_public(self):
+        field = get_spec("resource_link")["outputs"][0]
+        self.assertIs(_configuration(field)["secret"], True)
+        self.assertIs(_configuration(field, secret=False)["secret"], False)
+        for flag in [True, None, 0, "", "false", [], {}]:
+            with self.subTest(flag=flag):
+                self.assertIs(_configuration(field, secret=flag)["secret"], True)
+        self.assertNotIn("secret", field)
+
+    def test_shop_editor_can_edit_text_but_resource_url_remains_secret(self):
+        expected = {
+            "resource_link": {
+                "resource_url": (True, "url"),
+                "message": (False, "textarea"),
+            },
+            "personalized_text": {"template": (False, "textarea")},
+        }
+        for processor_id, fields in expected.items():
+            with self.subTest(processor_id=processor_id):
+                spec = get_spec(processor_id)
+                self.assertEqual(
+                    {
+                        field["key"]: (field["secret"], field["type"])
+                        for field in spec["configuration"]
+                    },
+                    fields,
+                )
+                self.assertEqual(spec["configuration"], spec["shop_configuration"])
+
+    def test_configuration_classification_does_not_change_customer_schemas(self):
+        expected = {
+            "resource_link": {
+                "parameters": [],
+                "outputs": [
+                    ("resource_url", "url", True),
+                    ("message", "textarea", False),
+                ],
+            },
+            "personalized_text": {
+                "parameters": [("name", "text", True)],
+                "outputs": [("content", "textarea", True)],
+            },
+        }
+        for processor_id, schemas in expected.items():
+            spec = get_spec(processor_id)
+            for kind, fields in schemas.items():
+                with self.subTest(processor_id=processor_id, kind=kind):
+                    self.assertEqual(
+                        [
+                            (field["key"], field["type"], field["required"])
+                            for field in spec[kind]
+                        ],
+                        fields,
+                    )
+                    for field in spec[kind]:
+                        self.assertTrue(
+                            {"secret", "default", "max_length"}.isdisjoint(field)
+                        )
 
     def test_specs_are_defensive_deep_copies(self):
         spec = get_spec("resource_link")
@@ -234,6 +296,56 @@ class PersonalizedTextTests(unittest.TestCase):
 
 
 class ProcessorContextTests(unittest.TestCase):
+    def test_environment_is_copied_readonly_and_not_inserted_into_result_or_progress(
+        self,
+    ):
+        environment = {"NAME": "private-workflow-value", "API_TOKEN": "private-token"}
+        values = []
+        context = ProcessorContext(environment=environment, emit=values.append)
+        environment["API_TOKEN"] = "changed-after-construction"
+        self.assertEqual(context.environment["API_TOKEN"], "private-token")
+        with self.assertRaises(TypeError):
+            context.environment["API_TOKEN"] = "replaced"
+        with self.assertRaises(AttributeError):
+            context.environment = {}
+        result = run(
+            "personalized_text",
+            {"name": "Alice"},
+            {"template": "Hello $name"},
+            context=context,
+        )
+        self.assertEqual(result["output"], {"content": "Hello Alice"})
+        for value in [json.dumps(values), json.dumps(result), repr(context)]:
+            self.assertNotIn("private-workflow-value", value)
+            self.assertNotIn("private-token", value)
+        self.assertEqual(ProcessorContext().environment, {})
+
+    def test_environment_validation_is_bounded_and_errors_hide_secret_values(self):
+        for environment in [
+            None,
+            [],
+            {"lowercase": "private-environment-value"},
+            {"BAD-NAME": "private-environment-value"},
+            {"A" * 65: "private-environment-value"},
+            {"API_TOKEN": None},
+            {"API_TOKEN": {"value": "private-environment-value"}},
+            {"API_TOKEN": "private-environment-value\x00"},
+            {"API_TOKEN": "private-environment-value\ud800"},
+            {"API_TOKEN": "x" * 8193},
+            {"API_TOKEN": "文" * 2731},
+            {f"VALUE_{i}": "" for i in range(129)},
+            {f"VALUE_{i}": "x" * 8192 for i in range(9)},
+        ]:
+            with self.subTest(environment=environment):
+                with self.assertRaises(ProcessorError) as error:
+                    ProcessorContext(environment=environment)
+                self.assertNotIn("private-environment-value", str(error.exception))
+        environment = {f"VALUE_{i}": "" for i in range(128)}
+        environment.update({f"VALUE_{i}": "x" * 8192 for i in range(8)})
+        self.assertEqual(
+            len(ProcessorContext(environment=environment).environment), 128
+        )
+
     def test_code_declares_shop_configuration_and_default_step_plan(self):
         spec = get_spec("resource_link")
         self.assertEqual(spec["configuration"], spec["shop_configuration"])
@@ -422,6 +534,61 @@ class CliTests(unittest.TestCase):
                 "output": {"resource_url": "https://example.test/item", "message": ""},
             },
         )
+
+    def test_environment_envelope_does_not_override_customer_name_or_copy_secrets(self):
+        result = self.call(
+            {
+                "params": {"name": "Alice"},
+                "configuration": {"template": "Hello $name"},
+                "environment": {
+                    "NAME": "private-env-name",
+                    "API_TOKEN": "private-env-token",
+                },
+            },
+            "personalized_text",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b"")
+        values = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(values[-1]["output"], {"content": "Hello Alice"})
+        self.assertNotIn(b"private-env", result.stdout)
+
+    def test_invalid_environment_fails_before_output_without_echoing_values(self):
+        for environment in [
+            None,
+            [],
+            {"lowercase": "private-env-value"},
+            {"API_TOKEN": "private-env-value\x00"},
+            {"API_TOKEN": {"nested": "private-env-value"}},
+            {"API_TOKEN": "private-env-value\ud800"},
+        ]:
+            with self.subTest(environment=environment):
+                result = self.call(
+                    {
+                        "params": {},
+                        "configuration": {"resource_url": "https://example.test/item"},
+                        "environment": environment,
+                    }
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(
+                    json.loads(result.stderr), {"error": "invalid_environment"}
+                )
+                self.assertNotIn(b"private-env-value", result.stderr)
+
+    def test_total_input_budget_includes_other_fields_and_valid_environment(self):
+        result = self.call(
+            {
+                "params": {"name": "Alice"},
+                "configuration": {"template": "x" * 143000},
+                "environment": {f"VALUE_{i}": "s" * 8192 for i in range(8)},
+            },
+            "personalized_text",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(json.loads(result.stderr), {"error": "input_too_large"})
 
     def test_failure_does_not_echo_secrets_or_emit_success(self):
         secret = "http://user:secret-password@example.test/private-secret"
