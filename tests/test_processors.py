@@ -273,6 +273,24 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(secret.encode(), result.stderr)
         self.assertNotIn(b"secret-password", result.stderr)
 
+    def test_server_variant_metadata_is_optional_and_does_not_override_inputs(self):
+        result = self.call(
+            {
+                "params": {"name": "Alice"},
+                "configuration": {"template": "Hello $name"},
+                "variant": {
+                    "id": "plus",
+                    "name": "Plus",
+                    "attributes": {"name": "Mallory"},
+                },
+                "steps": [{"id": "prepare", "label": {"en": "Prepare"}, "done": False}],
+                "completed_steps": [],
+            },
+            "personalized_text",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["output"]["content"], "Hello Alice")
+
     def test_envelope_and_json_are_strict(self):
         for value in [
             b"not json",
@@ -281,6 +299,8 @@ class CliTests(unittest.TestCase):
             [],
             {"params": {}, "configuration": {}, "id": "extra"},
             {"params": {}},
+            {"params": {}, "configuration": {}, "variant": []},
+            {"params": {}, "configuration": {}, "variant": None},
         ]:
             with self.subTest(value=value):
                 result = self.call(value)

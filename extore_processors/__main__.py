@@ -19,7 +19,18 @@ def main() -> int:
             value = json.loads(raw)
         except (ValueError, UnicodeDecodeError, RecursionError):
             raise ProcessorError("invalid_json") from None
-        if not isinstance(value, dict) or set(value) != {"params", "configuration"}:
+        if (
+            not isinstance(value, dict)
+            or not {"params", "configuration"} <= set(value)
+            or set(value)
+            - {"params", "configuration", "variant", "steps", "completed_steps"}
+            or ("variant" in value and not isinstance(value["variant"], dict))
+            or ("steps" in value and not isinstance(value["steps"], list))
+            or (
+                "completed_steps" in value
+                and not isinstance(value["completed_steps"], list)
+            )
+        ):
             raise ProcessorError("invalid_job_envelope")
         result = run(sys.argv[1], value["params"], value["configuration"])
         print(
