@@ -4,6 +4,7 @@ import json
 import sys
 
 from .catalog import ProcessorContext, ProcessorError, run
+from .delivery_context import INITIAL_REVISION
 
 MAX_INPUT_BYTES = 200000
 
@@ -33,6 +34,13 @@ def main() -> int:
                 "environment",
                 "product_id",
                 "instructions",
+                "job_id",
+                "attempt",
+                "card_attributes",
+                "entitlements",
+                "revision",
+                "deliveries",
+                "last_delivery",
             }
             or ("variant" in value and not isinstance(value["variant"], dict))
             or ("steps" in value and not isinstance(value["steps"], list))
@@ -53,6 +61,13 @@ def main() -> int:
             environment=value.get("environment", {}),
             product_id=value.get("product_id"),
             instructions=value.get("instructions"),
+            job_id=value.get("job_id"),
+            attempt=value.get("attempt"),
+            card_attributes=value.get("card_attributes", {}),
+            entitlements=value.get("entitlements"),
+            revision=value.get("revision", INITIAL_REVISION),
+            deliveries=value.get("deliveries", []),
+            last_delivery=value.get("last_delivery"),
             emit=emit,
         )
         result = run(

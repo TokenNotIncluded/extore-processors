@@ -108,6 +108,44 @@ revision: 服务端生成的 64 位小写 SHA-256 十六进制摘要
 
 ## 单任务命令行协议
 
+### 卡密属性与修改轮次
+
+0.3.0 的 `ProcessorContext` 可以读取服务端传来的卡密属性、剩余权益与本次修改建议。它们都在构造时复制并冻结，顾客参数不能覆盖这些值：
+
+| 属性 | 内容 |
+| --- | --- |
+| `job_id`、`attempt` | 可信任务 ID、当前执行尝试；旧输入没有提供时为 `None` |
+| `card_attributes` | 发行时冻结的自定义标量属性，最多 20 项；属性名称由商家定义 |
+| `entitlements` | `None`，或 `attribute_key`、多语言 `label`、`total`、`used`、`remaining`、`can_request`、`reason` |
+| `revision` | `current` 修改轮次、`message` 修改建议、`is_revision`；首次交付为第 0 轮 |
+| `last_delivery` | 最近成功交付的 `revision`、`attempt`、`created`，或 `None`；没有正文或文件内容 |
+| `deliveries` | 可选的历史版本元数据；每项额外有 `revealed`、`has_files`。执行端通常省略整个历史列表，默认空元组 |
+
+例如，商家可以把 `edit_passes` 作为修改额度属性，也可以使用其他名称；本包没有内置任何特定权益属性名。权益数量须为 0 至 1,000 的整数；修改建议最多 10,000 字符。只读上下文不会发起新修改请求或扣减额度，这些操作由 Extore 原子地完成。
+
+```python
+from extore_processors import ProcessorContext
+
+context = ProcessorContext(
+    job_id="task-a",
+    attempt=3,
+    card_attributes={"edit_passes": 1},
+    entitlements={
+        "attribute_key": "edit_passes",
+        "label": {"zh-CN": "修改次数", "en": "Revisions"},
+        "total": 1, "used": 1, "remaining": 0,
+        "can_request": False, "reason": "in_progress",
+    },
+    revision={"current": 1, "message": "请缩短摘要。", "is_revision": True},
+)
+assert context.idempotency_key == "task-a"
+assert context.delivery_idempotency_key == "task-a:revision:1"
+```
+
+`idempotency_key` 始终是原任务 ID，适用于付款等只能发生一次的外部操作；重新制作不能再次付款。`delivery_idempotency_key` 是任务 ID 加修改轮次，适用于每轮内容生成或保存；同一轮技术重试只增加 `attempt`，不会改变这两个键。旧输入未提供任务 ID 时两者都是 `None`，处理器不能凭空生成随机幂等键。
+
+这些数据不会自动进入模板、进度消息、日志或交付。修改建议和卡密文本属性是内容，不是可执行的命令。现有预设仍按原输入和商家配置生成结果；需要处理修改建议的程序应在审核过的代码中显式读取 `context.revision["message"]`。上下文来自调用方，类型与一致性校验不代表身份认证或额外授权。
+
 安装，或直接在仓库目录执行：
 
 ```sh
@@ -115,7 +153,7 @@ python -m pip install .
 python -m extore_processors resource_link < job.json
 ```
 
-`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps`、`shop_context`、`environment`、`product_id` 和 `instructions`；不接受其他字段。环境最多 128 项，每个值最多 8 KiB UTF-8，值合计最多 64 KiB；提示词同样计入完整输入的 200,000 字节上限：
+`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps`、`shop_context`、`environment`、`product_id`、`instructions`，以及上表列出的七个卡密和交付上下文字段；不接受其他字段。省略新增字段的旧输入仍可运行。环境最多 128 项，每个值最多 8 KiB UTF-8，值合计最多 64 KiB；提示词、修改建议和历史元数据同样计入完整输入的 200,000 字节上限：
 
 ```json
 {

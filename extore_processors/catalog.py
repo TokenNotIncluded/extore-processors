@@ -11,6 +11,16 @@ from string import Template
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
+from .delivery_context import (
+    INITIAL_REVISION,
+    freeze_attributes,
+    freeze_deliveries,
+    freeze_delivery,
+    freeze_entitlements,
+    freeze_revision,
+    validate_identity,
+)
+
 MAX_ENVIRONMENT_FIELDS = 128
 MAX_ENVIRONMENT_VALUE_BYTES = 8192
 MAX_ENVIRONMENT_BYTES = 65536
@@ -188,6 +198,13 @@ class ProcessorContext:
         environment=MappingProxyType({}),
         product_id=None,
         instructions=None,
+        job_id=None,
+        attempt=None,
+        card_attributes=MappingProxyType({}),
+        entitlements=None,
+        revision=INITIAL_REVISION,
+        deliveries=(),
+        last_delivery=None,
         emit=None,
     ):
         self._steps = self._freeze(_step_plan(steps, allow_empty=True))
@@ -208,6 +225,19 @@ class ProcessorContext:
             raise ProcessorError("invalid_product_context")
         self._instructions = _freeze_instructions(
             instructions, shop_id=shop_context.shop_id, product_id=product_id
+        )
+        validate_identity(job_id, attempt, ProcessorError)
+        self._job_id, self._attempt = job_id, attempt
+        self._card_attributes = freeze_attributes(card_attributes, ProcessorError)
+        self._revision = freeze_revision(revision, ProcessorError)
+        self._entitlements = freeze_entitlements(
+            entitlements, self.card_attributes, self.revision, ProcessorError
+        )
+        self._deliveries = freeze_deliveries(deliveries, ProcessorError)
+        self._last_delivery = (
+            freeze_delivery(last_delivery, ProcessorError)
+            if last_delivery is not None
+            else None
         )
         self._emit = emit or (lambda value: None)
 
@@ -241,6 +271,46 @@ class ProcessorContext:
     def instructions(self):
         """Frozen factory/workshop guidance, independent from customer params."""
         return self._instructions
+
+    @property
+    def job_id(self):
+        return self._job_id
+
+    @property
+    def attempt(self):
+        return self._attempt
+
+    @property
+    def card_attributes(self):
+        return self._card_attributes
+
+    @property
+    def entitlements(self):
+        return self._entitlements
+
+    @property
+    def revision(self):
+        return self._revision
+
+    @property
+    def deliveries(self):
+        return self._deliveries
+
+    @property
+    def last_delivery(self):
+        return self._last_delivery
+
+    @property
+    def idempotency_key(self):
+        """Stable task identity for payment and one-time external side effects."""
+        return self.job_id
+
+    @property
+    def delivery_idempotency_key(self):
+        """Stable content version identity, independent of technical retry count."""
+        if self.job_id is None:
+            return None
+        return f"{self.job_id}:revision:{self.revision['current']}"
 
     @staticmethod
     def _message(value):
