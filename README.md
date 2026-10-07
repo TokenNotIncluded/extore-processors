@@ -6,6 +6,8 @@
 
 MIT 许可，Python 3.11 或更新版本，只使用 Python 标准库，没有运行时依赖。
 
+想贡献自己的处理器？从 [贡献指南与开发脚手架](CONTRIBUTING.md) 开始，再 [提交 PR](https://github.com/TokenNotIncluded/extore-processors/compare)。Fork 或 PR 不会自动安装执行；审核合并后还需 Extore 更新固定子模块并发布。
+
 ## 预设
 
 | 预设 ID | 顾客填写 | 商家配置 | 成功输出 |
