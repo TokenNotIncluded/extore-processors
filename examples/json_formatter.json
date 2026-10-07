@@ -1,0 +1,9 @@
+{
+  "params": {
+    "json_text": "{\"timeout\": 30, \"threshold\": 1.20e-3, \"amount\": 12345678901234567890.123456789, \"features\": [\"documents\", \"charts\"], \"enabled\": true}"
+  },
+  "configuration": {
+    "indent": "2",
+    "sort_keys": "yes"
+  }
+}

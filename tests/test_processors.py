@@ -24,7 +24,15 @@ class CatalogTests(unittest.TestCase):
     def test_closed_registry_has_bilingual_code_defined_schemas(self):
         specs = catalog()
         self.assertEqual(
-            [spec["id"] for spec in specs], ["resource_link", "personalized_text"]
+            [spec["id"] for spec in specs],
+            [
+                "resource_link",
+                "personalized_text",
+                "csv_summary",
+                "json_formatter",
+                "text_cleanup",
+                "document_template",
+            ],
         )
         for spec in specs:
             self.assertEqual(spec["schema_version"], 1)
@@ -109,7 +117,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(len(get_spec("resource_link")["configuration"]), 2)
         specs = catalog()
         specs.clear()
-        self.assertEqual(len(catalog()), 2)
+        self.assertEqual(len(catalog()), 6)
 
     def test_unknown_identifier_cannot_be_a_filename_or_module(self):
         for processor_id in ["../handler", "os.system", "handler.py", "", None, []]:

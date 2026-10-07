@@ -1,0 +1,10 @@
+{
+  "params": {
+    "csv_text": "group,score\nbaseline,10\nbaseline,14\ntreatment,19\ntreatment,23\n",
+    "value_column": "score",
+    "group_column": "group"
+  },
+  "configuration": {
+    "invalid_policy": "reject"
+  }
+}

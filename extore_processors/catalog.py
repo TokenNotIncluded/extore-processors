@@ -11,6 +11,7 @@ from string import Template
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
+from . import csv_summary, document_template, json_formatter, text_cleanup
 from .delivery_context import (
     INITIAL_REVISION,
     freeze_attributes,
@@ -20,21 +21,21 @@ from .delivery_context import (
     freeze_revision,
     validate_identity,
 )
+from .schema import (
+    ProcessorError,
+)
+from .schema import (
+    configuration as _configuration,
+)
+from .schema import (
+    field as _field,
+)
 
 MAX_ENVIRONMENT_FIELDS = 128
 MAX_ENVIRONMENT_VALUE_BYTES = 8192
 MAX_ENVIRONMENT_BYTES = 65536
 WORK_INSTRUCTIONS_SCHEMA = "extore.work-instructions.v1"
 MAX_WORK_INSTRUCTION_LENGTH = 4000
-
-
-class ProcessorError(ValueError):
-    """A safe validation error that never includes customer or secret values."""
-
-    def __init__(self, code: str, field: str | None = None):
-        self.code = code
-        self.field = field
-        super().__init__(code + (f": {field}" if field else ""))
 
 
 def _freeze_environment(value):
@@ -351,17 +352,6 @@ class ProcessorContext:
         self._emit(payload)
 
 
-def _field(key, zh, en, *, kind="text", required=True, zh_help="", en_help=""):
-    return {
-        "key": key,
-        "label": {"zh-CN": zh, "en": en},
-        "description": {"zh-CN": zh_help, "en": en_help},
-        "collapsed": True,
-        "required": required,
-        "type": kind,
-    }
-
-
 _RESOURCE_URL = _field(
     "resource_url",
     "资源链接",
@@ -404,13 +394,14 @@ _TEMPLATE = _field(
     ),
 )
 
-
-def _configuration(field, *, max_length=10000, default=None, secret=True):
-    # Only an explicit False permits exposing a value in the shop editor.
-    value = {**field, "secret": secret is not False, "max_length": max_length}
-    if default is not None:
-        value["default"] = default
-    return value
+_EXTENSIONS = MappingProxyType(
+    {
+        "csv_summary": csv_summary,
+        "json_formatter": json_formatter,
+        "text_cleanup": text_cleanup,
+        "document_template": document_template,
+    }
+)
 
 
 _SPECS = MappingProxyType(
@@ -450,6 +441,7 @@ _SPECS = MappingProxyType(
                 )
             ],
         },
+        **{key: module.SPEC for key, module in _EXTENSIONS.items()},
     }
 )
 
@@ -477,7 +469,14 @@ def catalog() -> list[dict]:
     return [get_spec(processor_id) for processor_id in _SPECS]
 
 
-def _strings(values, fields, *, defaults=False, allow_incomplete=False):
+def _strings(
+    values,
+    fields,
+    *,
+    defaults=False,
+    allow_incomplete=False,
+    preserve_whitespace=False,
+):
     if not isinstance(values, Mapping):
         raise ProcessorError("expected_object")
     keys = {field["key"] for field in fields}
@@ -490,12 +489,18 @@ def _strings(values, fields, *, defaults=False, allow_incomplete=False):
         if not isinstance(value, str):
             raise ProcessorError("expected_string", key)
         # Preserve intentionally formatted delivery templates and instructions.
-        if field["type"] != "textarea":
+        if field["type"] != "textarea" and not preserve_whitespace:
             value = value.strip()
         if field["required"] and not value.strip() and not allow_incomplete:
             raise ProcessorError("required_field", key)
         if len(value) > field.get("max_length", 10000):
             raise ProcessorError("value_too_long", key)
+        if (
+            field["type"] == "select"
+            and value
+            and value not in {option["value"] for option in field["options"]}
+        ):
+            raise ProcessorError("invalid_option", key)
         result[key] = value
     return result
 
@@ -545,11 +550,16 @@ def validate_configuration(
         spec["configuration"],
         defaults=True,
         allow_incomplete=allow_incomplete,
+        preserve_whitespace=processor_id in _EXTENSIONS,
     )
     if processor_id == "resource_link":
         _https_url(result["resource_url"])
-    else:
+    elif processor_id == "personalized_text":
         _template(result["template"])
+    else:
+        result = _EXTENSIONS[processor_id].validate_configuration(
+            result, allow_incomplete=allow_incomplete
+        )
     return result
 
 
@@ -565,16 +575,24 @@ def _personalized_text(params, configuration):
 
 
 _HANDLERS = MappingProxyType(
-    {"resource_link": _resource_link, "personalized_text": _personalized_text}
+    {
+        "resource_link": _resource_link,
+        "personalized_text": _personalized_text,
+        **{key: module.process for key, module in _EXTENSIONS.items()},
+    }
 )
 
 
 def validate_parameters(processor_id: str, params) -> dict[str, str]:
     """Validate customer input before accepting a job as well as at runtime."""
     spec = get_spec(processor_id)
-    values = _strings(params, spec["parameters"])
+    values = _strings(
+        params, spec["parameters"], preserve_whitespace=processor_id in _EXTENSIONS
+    )
     if processor_id == "personalized_text" and len(values["name"]) > 200:
         raise ProcessorError("value_too_long", "name")
+    if processor_id in _EXTENSIONS:
+        values = _EXTENSIONS[processor_id].validate_parameters(values)
     return values
 
 
@@ -606,6 +624,17 @@ def run(
     output = _strings(output, fields)
     if processor_id == "resource_link":
         _https_url(output["resource_url"])
+    try:
+        result_bytes = len(
+            json.dumps(
+                {"kind": "result", "state": "succeeded", "output": output},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    except UnicodeError:
+        raise ProcessorError("invalid_output_text") from None
+    if result_bytes > 100000:
+        raise ProcessorError("output_too_large")
     context.progress(
         99,
         "交付内容已准备好",

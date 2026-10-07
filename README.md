@@ -12,6 +12,12 @@ MIT 许可，Python 3.11 或更新版本，只使用 Python 标准库，没有�
 | --- | --- | --- | --- |
 | `resource_link` | 无 | `resource_url` 必填；`message` 可选 | `resource_url`、`message` |
 | `personalized_text` | `name` 称呼，必填，最多 200 字符 | `template` 纯文本模板 | `content` |
+| `csv_summary` | `csv_text` CSV 文本、`value_column` 数值列名；`group_column` 分组列名可选 | `invalid_policy`：`reject`（默认）或 `skip` | `report` 统计说明、`summary` JSON 字符串 |
+| `json_formatter` | `json_text` 完整 JSON | `indent`：`2`（默认）、`4` 或 `compact`；`sort_keys`：`no`（默认）或 `yes` | `formatted_json`、`report` |
+| `text_cleanup` | `text` 每行一条的文本 | `trim_lines`、`remove_blank_lines` 默认 `yes`；`deduplicate`：`exact`（默认）、`casefold` 或 `none` | `cleaned_text`、`report` |
+| `document_template` | `title` 标题、`body` 正文；`name` 称呼可选 | `template` 文本模板；`output_format`：`markdown`（默认）或 `plain` | `content`、`format` |
+
+这四个处理器分别用于实验 CSV 的描述统计、API 配置的 JSON 校验、条目名单去重、项目或交付说明模板。输入是粘贴的文本，结果是可复制的文本、Markdown 或 JSON；不读取附件、不联网、不调用 AI，不生成 DOCX/PPTX 文件。
 
 `resource_link` 返回商家配置的 HTTPS 资源地址和使用说明，不访问资源地址。地址可包含访问令牌，按秘密配置处理；说明为普通文本，店主可回读编辑。二者都不会通过公开商品资料提前提供。使用说明按多行纯文本交付。
 
@@ -23,6 +29,55 @@ MIT 许可，Python 3.11 或更新版本，只使用 Python 标准库，没有�
 ```
 
 模板不执行 Python、HTML、Shell 或其他代码。顾客名字里的占位符也不会再次替换。
+
+### 可直接运行的场景
+
+在本仓库目录运行以下命令。每个示例文件都是一份完整任务，含顾客 `params` 和商家 `configuration`；不含真实顾客资料或凭据。没有安装本包时也可从本仓库目录执行：
+
+```sh
+# 实验记录：按 group 列分别汇总 score 列
+python -m extore_processors csv_summary < examples/csv_summary.json
+
+# API 配置：保留数值精度与原有指数写法，按键排序、缩进
+python -m extore_processors json_formatter < examples/json_formatter.json
+
+# 项目条目名单：去首尾空白、空行，忽略大小写去重并保留第一次文字
+python -m extore_processors text_cleanup < examples/text_cleanup.json
+
+# 交付说明：将标题、称呼与正文填入商家模板
+python -m extore_processors document_template < examples/document_template.json
+```
+
+stdout 是进度 JSON 行，最后一行的 `kind` 为 `result`、`state` 为 `succeeded`。实际内容位于 `output`；`csv_summary.summary` 本身是字符串，使用时再做一次 JSON 解析。示例可用于主项目打包、隔离执行与结果协议验证；直接运行上述 Python 命令不创建沙箱。
+
+`csv_summary` 只统计所选数值列，分组列可留空。默认 `reject` 遇到不合法数据即拒绝；选择 `skip` 时会在结果中报告被跳过的记录，不把缺失值默认为零。统计是所提供记录的描述，不代替实验设计、统计推断或因果结论。
+
+`json_formatter` 支持任意合法 JSON 顶层值。数字保留原文，例如 `12345678901234567890.123456789` 和 `1.20e-3` 不经过二进制浮点转换；对象键默认保留输入顺序，数组顺序和字符串内容保持不变。重复键、非有限数字、孤立 Unicode 代理项、注释和尾逗号会被拒绝。
+
+`text_cleanup` 先按配置去除首尾空白，再处理空行和重复行，始终保留首次出现的顺序。`casefold` 只改变比较方式，不把交付文字改成小写。CRLF 与 CR 换行为 LF，不进行 Unicode 规范化；所有条目被删除时，`cleaned_text` 可以为空，报告仍显示实际删除数量。
+
+`document_template` 的默认模板如下，空行是实际换行：
+
+```text
+# $title
+
+$name
+
+$body
+```
+
+它只接受 `$title`、`$name`、`$body`、对应的 `${...}` 和 `$$`，只替换一次。Markdown 格式将标题与称呼作为单行文字转义，正文保留顾客提供的 Markdown；`plain` 按文字填入模板，不会自动移除模板里的 Markdown 符号。正文、网址和占位符都是内容，不执行、不访问，也不会读取工作流环境或秘密。
+
+四个新增处理器的长文本字段最多 10,000 字符；`document_template.title` 和 `name` 各最多 200 字符。商家配置枚举也必须以字符串填写，例如 `"indent": "2"`，不能使用数字 `2`。
+
+| 处理器 | 额外资源限制 |
+| --- | --- |
+| `csv_summary` | 最多 500 个数据行、1,001 个含空白记录的 CSV 记录、30 列、50 组；表头最多 100 字符、组名 200 字符。数值最多 30 位有效数字，非零绝对值 `1e-30` 至 `1e12`，指数绝对值不超过 30。每个输出字符串最多 100,000 字符。 |
+| `json_formatter` | 最多 32 层容器、10,000 个值、每容器 2,000 项；单个数字最多 256 字符、128 位有效数字，指数绝对值不超过 1,000。格式化 JSON 与报告合计最多 100,000 UTF-8 字节。 |
+| `text_cleanup` | 最多 10,000 行；清理文本与报告合计最多 100,000 UTF-8 字节。 |
+| `document_template` | 模板最多 10,000 字符；生成的 `content` 最多 100,000 UTF-8 字节。 |
+
+上述字段限制还须满足整份任务输入的 200,000 字节限制。成功结果的整条 JSONL 最多 100,000 UTF-8 字节，包括结果信封、所有输出字段和 JSON 转义；超限会拒绝返回成功，因此不能让各字段同时占满上限。服务器默认运行限制为 120 秒墙钟时间、120 秒 CPU、256 MiB 地址空间、1,000,000 字节进程输出，可在本店配置档案允许范围内调整。直接运行 Python API 或下方命令行不会应用 Extore 的隔离与进程资源限制。
 
 队列商品没有这个处理程序，输入和输出由 Extore 内的商品配置定义，处理者可以是商家、拥有商品管理链接的协作者，或者 AI。
 
@@ -165,7 +220,7 @@ python -m extore_processors resource_link < job.json
 }
 ```
 
-成功时 stdout 是逐行 JSON：零或多条进度，最后且仅有一条结果，退出状态为 `0`。空步骤计划的示例：
+成功时 stdout 是逐行 JSON：零或多条进度，最后且仅有一条结果，退出状态为 `0`。最终结果整行最多 100,000 UTF-8 字节，包括 JSON 信封、输出字段和转义；单个字段未超限也可能因合计过大被拒绝。空步骤计划的示例：
 
 ```json
 {"kind":"progress","progress_steps":[{"id":"validate_input","label":{"zh-CN":"核对信息","en":"Validate inputs"}},{"id":"prepare_delivery","label":{"zh-CN":"生成交付","en":"Prepare delivery"}}],"progress":0,"completed_steps":[],"message":"开始处理"}
@@ -174,7 +229,7 @@ python -m extore_processors resource_link < job.json
 {"kind":"result","state":"succeeded","output":{"resource_url":"https://example.com/download","message":"打开链接领取资源。"}}
 ```
 
-输入、配置或计划校验失败时 stdout 为空，stderr 只有安全的错误代码与字段名，退出状态为 `2`。执行过程异常可能已经输出进度，但不会输出成功结果或异常中的私密值。输入限制为 200,000 字节。
+开始报告进度之前的输入、配置或计划校验失败时，stdout 为空。处理阶段才发现的错误可能已经输出进度，例如 CSV 严格模式发现无效数值；任何失败都不会输出成功结果。stderr 只有安全的错误代码与字段名，不包含私密值，退出状态为 `2`。输入限制为 200,000 字节。
 
 ```json
 {"error":"invalid_https_url","field":"resource_url"}
@@ -188,7 +243,7 @@ python -m extore_processors resource_link < job.json
 python -m unittest discover -s tests -v
 ```
 
-新增预设应把规格和唯一处理函数一起加入 `extore_processors/catalog.py`，补充输入校验、结果校验、失败路径和协议测试。不要增加按配置动态导入、`eval`、`exec`、Shell 执行或任意网络请求。
+新增预设应在独立模块中定义规格与处理函数，并加入 `extore_processors/catalog.py` 的固定目录，补充输入校验、结果校验、失败路径、可执行示例和协议测试。不要增加按配置动态导入、`eval`、`exec`、Shell 执行或任意网络请求。
 
 Extore 主仓库取得已审核版本：
 

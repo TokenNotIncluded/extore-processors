@@ -1,0 +1,11 @@
+{
+  "params": {
+    "title": "实验报告交付说明",
+    "name": "项目负责人",
+    "body": "## 本次交付\n\n- 整理顾客提供的实验记录。\n- 表格保留原始数值。\n\n## 待确认\n\n请确认试验组名称与采样时间。"
+  },
+  "configuration": {
+    "template": "# $title\n\n致：$name\n\n$body\n\n请按上述待确认事项核对材料。",
+    "output_format": "markdown"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "params": {
+    "text": "  实验记录 A  \n\nDataset-A\ndataset-a\n实验记录 A\n结果表格 B\n"
+  },
+  "configuration": {
+    "trim_lines": "yes",
+    "remove_blank_lines": "yes",
+    "deduplicate": "casefold"
+  }
+}
