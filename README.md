@@ -91,6 +91,21 @@ result = run(
 
 `context.environment` 是独立的只读字符串映射，由 Extore 从本张卡密发行时冻结的店铺配置版本读取，包含普通变量和获准供此处理器使用的秘密值。默认是空映射，顾客参数不覆盖它。Extore 同时以 `EXTORE_WORKFLOW_<NAME>` 前缀传入进程环境，避免改变 Python、动态加载器或宿主服务的设置。环境不会自动插入模板、进度或交付输出；处理器代码仍须审查，不能把秘密打印、记录或交付给顾客。
 
+`context.instructions` 是本次执行开始时复制的只读工厂／车间工作提示词，独立于顾客 `params`、处理器 `configuration` 和环境。省略、`null` 或空对象表示没有此上下文，兼容旧版本输入。非空对象严格包含以下字段：
+
+```text
+schema: "extore.work-instructions.v1"
+shop_id: 本次执行的店铺 ID
+product_id: 本次执行的商品 ID
+factory_slogan: 工厂提示词（最多 4,000 字符）
+workshop_slogan: 车间提示词（最多 4,000 字符）
+revision: 服务端生成的 64 位小写 SHA-256 十六进制摘要
+```
+
+非空上下文需要额外传入可信的顶层 `product_id`，并保留 `shop_context.shop_id`；处理器分别比对两者，不能从提示词对象本身取得验证范围。直接使用 Python API 时同样传入 `ProcessorContext(product_id=product_id, shop_context=shop_context, instructions=instructions)`。上下文只保存文本；预设不会执行其中的代码、替换模板、覆盖顾客输入，或把它们自动加入日志、进度和交付。
+
+摘要由除 `revision` 外的五个字段生成：`json.dumps(body, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")`，再计算 SHA-256。它用于检查快照一致性，不代表身份认证或额外权限。已构造的上下文不会因商家之后修改提示词而改变；下一次执行可取得新快照。
+
 ## 单任务命令行协议
 
 安装，或直接在仓库目录执行：
@@ -100,7 +115,7 @@ python -m pip install .
 python -m extore_processors resource_link < job.json
 ```
 
-`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps`、`shop_context` 和 `environment`；不接受其他字段。环境最多 128 项，每个值最多 8 KiB UTF-8，值合计最多 64 KiB；完整输入仍最多 200,000 字节：
+`job.json` 必须包含 `params` 与 `configuration`。还可以包含服务端提供的 `variant`、`steps`、`completed_steps`、`shop_context`、`environment`、`product_id` 和 `instructions`；不接受其他字段。环境最多 128 项，每个值最多 8 KiB UTF-8，值合计最多 64 KiB；提示词同样计入完整输入的 200,000 字节上限：
 
 ```json
 {

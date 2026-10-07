@@ -1,7 +1,10 @@
 """Closed registry: accepting a processor ID never imports merchant code."""
 
 import copy
+import hashlib
+import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from string import Template
@@ -11,6 +14,8 @@ from urllib.parse import urlsplit
 MAX_ENVIRONMENT_FIELDS = 128
 MAX_ENVIRONMENT_VALUE_BYTES = 8192
 MAX_ENVIRONMENT_BYTES = 65536
+WORK_INSTRUCTIONS_SCHEMA = "extore.work-instructions.v1"
+MAX_WORK_INSTRUCTION_LENGTH = 4000
 
 
 class ProcessorError(ValueError):
@@ -47,6 +52,54 @@ def _freeze_environment(value):
             raise ProcessorError("environment_too_large")
         result[name] = content
     return MappingProxyType(result)
+
+
+def _freeze_instructions(value, *, shop_id, product_id):
+    """Validate trusted routing separately; preserve instruction text as data."""
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        raise ProcessorError("invalid_work_instructions")
+    if not value:
+        return MappingProxyType({})
+    fields = {
+        "schema",
+        "shop_id",
+        "product_id",
+        "factory_slogan",
+        "workshop_slogan",
+        "revision",
+    }
+    if set(value) != fields or value["schema"] != WORK_INSTRUCTIONS_SCHEMA:
+        raise ProcessorError("invalid_work_instructions")
+    if (
+        not isinstance(shop_id, str)
+        or not isinstance(product_id, str)
+        or value["shop_id"] != shop_id
+        or value["product_id"] != product_id
+    ):
+        raise ProcessorError("work_instructions_scope_mismatch")
+    for name in ("factory_slogan", "workshop_slogan"):
+        content = value[name]
+        if (
+            not isinstance(content, str)
+            or len(content) > MAX_WORK_INSTRUCTION_LENGTH
+            or any(
+                unicodedata.category(char) in {"Cc", "Cs"} and char not in "\t\r\n"
+                for char in content
+            )
+        ):
+            raise ProcessorError("invalid_work_instructions")
+    revision = value["revision"]
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+        raise ProcessorError("invalid_work_instructions")
+    body = {name: value[name] for name in fields if name != "revision"}
+    canonical = json.dumps(
+        body, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+    ).encode("ascii")
+    if hashlib.sha256(canonical).hexdigest() != revision:
+        raise ProcessorError("work_instructions_revision_mismatch")
+    return MappingProxyType({**body, "revision": revision})
 
 
 def _step_plan(value, *, allow_empty=False):
@@ -133,6 +186,8 @@ class ProcessorContext:
         completed_steps=(),
         shop_context=None,
         environment=MappingProxyType({}),
+        product_id=None,
+        instructions=None,
         emit=None,
     ):
         self._steps = self._freeze(_step_plan(steps, allow_empty=True))
@@ -147,6 +202,13 @@ class ProcessorContext:
             raise ProcessorError("invalid_shop_context")
         self._shop_context = shop_context
         self._environment = _freeze_environment(environment)
+        if product_id is not None and (
+            not isinstance(product_id, str) or not 1 <= len(product_id) <= 100
+        ):
+            raise ProcessorError("invalid_product_context")
+        self._instructions = _freeze_instructions(
+            instructions, shop_id=shop_context.shop_id, product_id=product_id
+        )
         self._emit = emit or (lambda value: None)
 
     @staticmethod
@@ -174,6 +236,11 @@ class ProcessorContext:
     def environment(self):
         """Frozen workflow variables and secrets, separate from customer inputs."""
         return self._environment
+
+    @property
+    def instructions(self):
+        """Frozen factory/workshop guidance, independent from customer params."""
+        return self._instructions
 
     @staticmethod
     def _message(value):
